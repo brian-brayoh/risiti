@@ -14,7 +14,10 @@ export default {
           900: "#064e3b",
         },
       },
-      fontFamily: { sans: ["var(--font-sans)", "system-ui", "sans-serif"] },
+      fontFamily: {
+        sans: ["var(--font-sans)"],
+        mono: ["var(--font-mono)"],
+      },
     },
   },
   plugins: [],
