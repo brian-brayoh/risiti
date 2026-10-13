@@ -1,0 +1,162 @@
+// Risiti - M-Pesa payments -> KRA eTIMS invoices
+// All money is stored in integer cents (KES x 100) to avoid rounding errors.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum MemberRole {
+  OWNER
+  ACCOUNTANT
+  STAFF
+}
+
+enum ShortcodeType {
+  PAYBILL
+  TILL
+}
+
+enum EtimsMode {
+  MOCK // simulated receipts - for demos and development only
+  OSCU // real KRA eTIMS (requires accreditation + device registration)
+}
+
+enum PaymentStatus {
+  RECEIVED  // stored, not processed yet
+  INVOICED  // invoice created (see invoice status for eTIMS result)
+  IGNORED   // manually excluded (e.g. owner top-up, refund)
+}
+
+enum InvoiceStatus {
+  PENDING   // created, waiting for eTIMS submission
+  SUBMITTED // accepted by eTIMS
+  FAILED    // eTIMS rejected or unreachable - will be retried
+}
+
+model User {
+  id           String       @id @default(cuid())
+  name         String
+  email        String       @unique
+  passwordHash String
+  createdAt    DateTime     @default(now())
+  memberships  Membership[]
+}
+
+model Business {
+  id                 String        @id @default(cuid())
+  name               String
+  kraPin             String
+  phone              String?
+  email              String?
+  address            String?
+  shortcode          String        @unique
+  shortcodeType      ShortcodeType @default(PAYBILL)
+  vatRegistered      Boolean       @default(true)
+  vatRateBps         Int           @default(1600) // 16.00% in basis points
+  itemDescription    String        @default("Goods and services")
+  invoicePrefix      String        @default("INV")
+  nextInvoiceNumber  Int           @default(1)
+  smsEnabled         Boolean       @default(true)
+  etimsMode          EtimsMode     @default(MOCK)
+  etimsBranchId      String        @default("00")
+  etimsDeviceSerial  String?
+  webhookToken       String        @unique @default(cuid())
+  createdAt          DateTime      @default(now())
+
+  members   Membership[]
+  customers Customer[]
+  payments  Payment[]
+  invoices  Invoice[]
+}
+
+model Membership {
+  id         String     @id @default(cuid())
+  userId     String
+  businessId String
+  role       MemberRole @default(OWNER)
+  createdAt  DateTime   @default(now())
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, businessId])
+}
+
+model Customer {
+  id         String   @id @default(cuid())
+  businessId String
+  name       String
+  accountRef String   // what the customer types as "Account number" on paybill
+  phone      String?
+  email      String?
+  kraPin     String?  // buyer PIN - needed for B2B invoices so the buyer can claim the expense
+  createdAt  DateTime @default(now())
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  payments Payment[]
+  invoices Invoice[]
+
+  @@unique([businessId, accountRef])
+  @@index([businessId, phone])
+}
+
+model Payment {
+  id           String        @id @default(cuid())
+  businessId   String
+  customerId   String?
+  transId      String        @unique // M-Pesa receipt e.g. SJK3XXXXXX - guarantees idempotency
+  transTime    DateTime
+  amountCents  Int
+  billRef      String?       // account number typed by payer (empty for tills)
+  msisdn       String?       // may be masked/hashed by Safaricom
+  payerName    String?
+  status       PaymentStatus @default(RECEIVED)
+  raw          Json
+  createdAt    DateTime      @default(now())
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  invoice  Invoice?
+
+  @@index([businessId, transTime])
+  @@index([businessId, status])
+}
+
+model Invoice {
+  id              String        @id @default(cuid())
+  businessId      String
+  customerId      String?
+  paymentId       String?       @unique
+  number          String
+  issuedAt        DateTime      @default(now())
+  description     String
+  buyerName       String
+  buyerPin        String?
+  subtotalCents   Int
+  vatCents        Int
+  totalCents      Int
+  vatRateBps      Int
+  status          InvoiceStatus @default(PENDING)
+  attempts        Int           @default(0)
+  etimsReceiptNo  String?
+  etimsSignature  String?
+  etimsVerifyUrl  String?
+  etimsError      String?
+  submittedAt     DateTime?
+  smsSentAt       DateTime?
+  createdAt       DateTime      @default(now())
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  payment  Payment?  @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@unique([businessId, number])
+  @@index([businessId, issuedAt])
+  @@index([status])
+}
